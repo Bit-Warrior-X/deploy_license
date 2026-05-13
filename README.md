@@ -8,6 +8,10 @@ target host to extract artifacts and bring up the `angelos`, `athens`, and
 
 Built with Node.js / Express 5 and MySQL.
 
+> See [`WORKFLOW.md`](./WORKFLOW.md) for the end-to-end procedure of
+> provisioning a new server (covers both `odysseus` ingestion and the
+> `/create_server` call).
+
 ---
 
 ## Features
