@@ -33,7 +33,15 @@ const MACHINE_ID_BIN = path.join(BIN_DIR, "machine_id");
 const GENERATE_LICENSE_SH = path.join(BIN_DIR, "generate_license.sh");
 const DEPLOY_SH = path.join(BIN_DIR, "deploy.sh");
 const GEODB_MMDB_TAR_GZ = path.join(BIN_DIR, "geodb", "dbip-full-2026-02.mmdb.tar.gz");
-const TRIAL_DURATION_DAYS = 3;
+// Supported license_type values and their generation defaults.
+// Trial is always auto-generated (3-day duration). L4 / L7 / Unified are auto-generated
+// by default but may instead reuse an existing license row when license_string is provided.
+const LICENSE_TYPES = {
+  trial:   { feature: 7, durationDays: 3,   allowReuse: false },
+  l4:      { feature: 1, durationDays: 365, allowReuse: true },
+  l7:      { feature: 2, durationDays: 365, allowReuse: true },
+  unified: { feature: 3, durationDays: 365, allowReuse: true },
+};
 const REMOTE_DEPLOY_PREFIX = "/tmp/dorian_deploy";
 
 function deployLog(level, reqId, msg, meta = null) {
@@ -188,7 +196,7 @@ function runCommand(cmd, args, options = {}) {
   });
 }
 
-function runGenerateLicenseScript({ ip, user, pass, sshPort, licenseType, durationDays, logContext }) {
+function runGenerateLicenseScript({ ip, user, pass, sshPort, licenseType, durationDays, feature, logContext }) {
   return new Promise((resolve, reject) => {
     if (logContext?.reqId) {
       deployLog("info", logContext.reqId, "generate_license.sh starting", {
@@ -197,25 +205,30 @@ function runGenerateLicenseScript({ ip, user, pass, sshPort, licenseType, durati
         sshPort,
         licenseType,
         durationDays,
+        feature,
       });
+    }
+    const scriptArgs = [
+      GENERATE_LICENSE_SH,
+      "--license_type",
+      licenseType,
+      "--duration",
+      String(durationDays),
+      "--ip",
+      String(ip),
+      "--user",
+      String(user),
+      "--pass",
+      String(pass),
+      "--ssh_port",
+      String(sshPort),
+    ];
+    if (feature != null) {
+      scriptArgs.push("--feature", String(feature));
     }
     const child = spawn(
       "bash",
-      [
-        GENERATE_LICENSE_SH,
-        "--license_type",
-        licenseType,
-        "--duration",
-        String(durationDays),
-        "--ip",
-        String(ip),
-        "--user",
-        String(user),
-        "--pass",
-        String(pass),
-        "--ssh_port",
-        String(sshPort),
-      ],
+      scriptArgs,
       {
         cwd: BIN_DIR,
         stdio: "pipe",
@@ -510,7 +523,7 @@ async function createLicenseTarball({ machineIdBin, licenseFile, publicKeyPem, t
   return tarPath;
 }
 
-async function insertTrialLicenseRow({
+async function insertGeneratedLicenseRow({
   uuid,
   name,
   ip,
@@ -522,6 +535,7 @@ async function insertTrialLicenseRow({
   pubKey,
   privateKey,
   token,
+  durationDays,
 }) {
   await dbPool.execute(
     `INSERT INTO license (uuid, name, ip, user, password, ssh_port, machine_id, license, pub_key, private_key, token, expire_date)
@@ -538,12 +552,12 @@ async function insertTrialLicenseRow({
       pubKey,
       privateKey,
       token,
-      TRIAL_DURATION_DAYS,
+      Number(durationDays),
     ]
   );
 }
 
-async function updatePaidLicenseConnection({ id, name, ip, user, pass, sshPort, token }) {
+async function updateExistingLicenseConnection({ id, name, ip, user, pass, sshPort, token }) {
   await dbPool.execute(
     `UPDATE license SET name = ?, ip = ?, user = ?, password = ?, ssh_port = ?, token = ?, updated = CURRENT_TIMESTAMP WHERE id = ?`,
     [name, ip, user, pass, Number(sshPort), token, id]
@@ -596,7 +610,7 @@ app.post("/upgrade_version", async (req, res) => {
     }
 
     const ltRaw = String(license_type || "trial").toLowerCase();
-    const lt = ltRaw === "paid" ? "paid" : "trial";
+    const lt = LICENSE_TYPES[ltRaw] ? ltRaw : "trial";
 
     let rowUuid = "";
     let machineId = null;
@@ -748,14 +762,26 @@ app.post("/create_server", async (req, res) => {
   }
 
   const lt = String(license_type).toLowerCase();
-  if (lt !== "trial" && lt !== "paid") {
+  const ltConfig = LICENSE_TYPES[lt];
+  if (!ltConfig) {
     deployLog("warn", reqId, "invalid license_type", { license_type: lt });
-    return res.status(400).json({ description: "license_type must be trial or paid" });
+    return res.status(400).json({
+      description: `license_type must be one of: ${Object.keys(LICENSE_TYPES).join(", ")}`,
+    });
   }
-  if (lt === "paid" && (!license_string || String(license_string).trim() === "")) {
-    deployLog("warn", reqId, "paid license missing license_string");
-    return res.status(400).json({ description: "license_string is required when license_type is paid" });
+
+  const hasLicenseString = license_string != null && String(license_string).trim() !== "";
+  if (hasLicenseString && !ltConfig.allowReuse) {
+    deployLog("warn", reqId, "license_string supplied for license_type that does not support reuse", {
+      license_type: lt,
+    });
+    return res.status(400).json({
+      description: `license_string is only accepted when license_type is one of: ${Object.keys(LICENSE_TYPES)
+        .filter((k) => LICENSE_TYPES[k].allowReuse)
+        .join(", ")}`,
+    });
   }
+  const reuseExistingLicense = hasLicenseString;
 
   const logContext = { reqId };
   deployLog("info", reqId, "create_server accepted", {
@@ -765,7 +791,8 @@ app.post("/create_server", async (req, res) => {
     ssh_port,
     license_type: lt,
     deploy_mode: deploy_mode ?? "default",
-    license_string_len: license_string ? String(license_string).length : 0,
+    license_string_len: hasLicenseString ? String(license_string).length : 0,
+    license_path: reuseExistingLicense ? "reuse_existing" : "generate_new",
   });
 
   const deployFlag = deployModeToRemoteFlag(deploy_mode);
@@ -812,8 +839,11 @@ app.post("/create_server", async (req, res) => {
     let licenseFilePath;
     let publicKeyPath;
 
-    if (lt === "trial") {
-      deployLog("info", reqId, "license path: trial (generate + DB insert)");
+    if (!reuseExistingLicense) {
+      deployLog("info", reqId, `license path: generate new ${lt} license`, {
+        feature: ltConfig.feature,
+        durationDays: ltConfig.durationDays,
+      });
       let genOut;
       try {
         genOut = await runGenerateLicenseScript({
@@ -821,8 +851,9 @@ app.post("/create_server", async (req, res) => {
           user,
           pass,
           sshPort: ssh_port,
-          licenseType: "trial",
-          durationDays: TRIAL_DURATION_DAYS,
+          licenseType: lt,
+          durationDays: ltConfig.durationDays,
+          feature: ltConfig.feature,
           logContext,
         });
       } catch (e) {
@@ -851,7 +882,7 @@ app.post("/create_server", async (req, res) => {
       privateKey = await fs.readFile(privateKeyPath, "utf8");
 
       rowUuid = crypto.randomUUID();
-      await insertTrialLicenseRow({
+      await insertGeneratedLicenseRow({
         uuid: rowUuid,
         name,
         ip,
@@ -863,17 +894,23 @@ app.post("/create_server", async (req, res) => {
         pubKey,
         privateKey,
         token,
+        durationDays: ltConfig.durationDays,
       });
-      await writeHistory(rowUuid, `trial license generated for machine_id=${machineId} ip=${ip}`);
-      deployLog("info", reqId, "trial license row inserted", { rowUuid, machineId });
+      await writeHistory(
+        rowUuid,
+        `${lt} license generated (feature=${ltConfig.feature}, duration=${ltConfig.durationDays}d) for machine_id=${machineId} ip=${ip}`
+      );
+      deployLog("info", reqId, `${lt} license row inserted`, { rowUuid, machineId });
+
+      workDir = await fs.mkdtemp(path.join(os.tmpdir(), `deploy_license-${lt}-`));
     } else {
-      deployLog("info", reqId, "license path: paid (lookup existing license row)");
+      deployLog("info", reqId, `license path: reuse existing license row (license_type=${lt})`);
       const [rows] = await dbPool.execute(
         "SELECT id, uuid, machine_id, license, pub_key, private_key FROM license WHERE license = ? LIMIT 1",
         [license_string]
       );
       if (!rows.length) {
-        deployLog("warn", reqId, "paid license_string not found in DB");
+        deployLog("warn", reqId, "license_string not found in DB");
         await appendSessionLog(ip, token, "license_validation_failed", { reason: "license_string not found" });
         return res.status(404).json({ description: "license not found" });
       }
@@ -884,14 +921,14 @@ app.post("/create_server", async (req, res) => {
       pubKey = row.pub_key;
       privateKey = row.private_key;
       if (!pubKey || licenseContent == null || licenseContent === "") {
-        deployLog("error", reqId, "paid license row missing pub_key or license content", { rowId: row.id });
+        deployLog("error", reqId, "license row missing pub_key or license content", { rowId: row.id });
         return res.status(500).json({
           code: 5000,
-          description: "paid license row is missing license or pub_key data",
+          description: "license row is missing license or pub_key data",
         });
       }
 
-      await updatePaidLicenseConnection({
+      await updateExistingLicenseConnection({
         id: row.id,
         name,
         ip,
@@ -901,16 +938,12 @@ app.post("/create_server", async (req, res) => {
         token,
       });
 
-      workDir = await fs.mkdtemp(path.join(os.tmpdir(), "deploy_license-paid-"));
+      workDir = await fs.mkdtemp(path.join(os.tmpdir(), `deploy_license-${lt}-reuse-`));
       licenseFilePath = path.join(workDir, "license.lic");
       publicKeyPath = path.join(workDir, "server_public_key.pem");
       await fs.writeFile(licenseFilePath, licenseContent, "utf8");
       await fs.writeFile(publicKeyPath, pubKey, "utf8");
-      await writeHistory(rowUuid, `paid license deploy for ip=${ip}`);
-    }
-
-    if (lt === "trial") {
-      workDir = await fs.mkdtemp(path.join(os.tmpdir(), "deploy_license-trial-"));
+      await writeHistory(rowUuid, `${lt} license reused (license_string match) for ip=${ip}`);
     }
 
     const versionRow = await getLatestDorianVersionRow();

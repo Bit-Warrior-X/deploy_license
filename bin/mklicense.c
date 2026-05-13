@@ -7,7 +7,7 @@
  *    "updated_at": "<ISO8601 UTC>",
  *    "duration": <int>,
  *    "feature": <int>,
- *    "license_type": "<paid|trial>"
+ *    "license_type": "<trial|l4|l7|unified>"
  *  }
  *
  * License wrapper:
@@ -159,13 +159,13 @@ int main(int argc, char** argv) {
     const char* machine_id   = get_arg(argc, argv, "--machine-id", NULL);
     int   duration           = get_arg_int(argc, argv, "--duration", -1);
     int   feature            = get_arg_int(argc, argv, "--feature", 0);
-    const char* license_type = get_arg(argc, argv, "--license-type", "paid"); // or "trial"
+    const char* license_type = get_arg(argc, argv, "--license-type", "trial"); // trial|l4|l7|unified
 
     if (!key_path || !machine_id || duration < 0) {
         fprintf(stderr,
             "Usage: %s --key <server_private_key.pem> [--out license.b64]\n"
             "          --machine-id ID --duration DAYS --feature N\n"
-            "          [--license-type paid|trial]\n"
+            "          [--license-type trial|l4|l7|unified]\n"
             "  (If key is encrypted, set KEY_PASSPHRASE environment variable)\n",
             argv[0]);
         return 2;

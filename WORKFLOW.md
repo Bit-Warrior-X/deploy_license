@@ -116,8 +116,22 @@ The newest row is what `/create_server` will pick up by default.
 
 ## 2. Call `/create_server`
 
-The single API call that provisions a new server. Two variants depending on
-whether you want a fresh trial license or want to reuse an existing paid one.
+The single API call that provisions a new server. Pick a `license_type` and
+optionally supply `license_string` to reuse an existing license row.
+
+### License tiers
+
+| `license_type` | feature | duration  | reuse via `license_string`? |
+| -------------- | ------- | --------- | --------------------------- |
+| `trial`        | 7       | 3 days    | no (always generates)       |
+| `l4`           | 1       | 365 days  | yes (optional)              |
+| `l7`           | 2       | 365 days  | yes (optional)              |
+| `unified`      | 3       | 365 days  | yes (optional)              |
+
+By default every tier generates a fresh license signed against the target's
+`machine_id`. For `l4` / `l7` / `unified`, sending `license_string` switches
+to the reuse path: the API looks up an existing row whose `license` column
+matches and re-ships the stored license + public key (no regeneration).
 
 ### Sequence
 
@@ -129,15 +143,15 @@ sequenceDiagram
     participant DB as MySQL (lic)
     participant T as Target server
 
-    Op->>API: POST /create_server (name, ip, user, pass, ssh_port,<br/>license_type, [license_string], token, deploy_mode)
+    Op->>API: POST /create_server (name, ip, user, pass, ssh_port,<br/>license_type=trial|l4|l7|unified,<br/>[license_string], token, deploy_mode)
     API->>API: AJV validate + check<br/>machine_id / deploy.sh / GeoIP
 
-    alt license_type = trial
+    alt license_string omitted (generate new — any license_type)
         API->>T: ssh get_remote_machine_id.sh
         T-->>API: machine_id
-        API->>API: gen RSA keypair + run mklicense
+        API->>API: gen RSA keypair + run mklicense<br/>(feature/duration from license_type)
         API->>DB: INSERT license + history
-    else license_type = paid
+    else license_string provided (l4 | l7 | unified only)
         API->>DB: SELECT license WHERE license = ?
         DB-->>API: row (uuid, machine_id, license, pub_key)
         API->>DB: UPDATE connection fields + INSERT history
@@ -156,7 +170,7 @@ sequenceDiagram
     API-->>Op: 200 JSON (uuid, machine_id, version,<br/>expire_date, server_status, ...)
 ```
 
-### 2a. Trial license (new server, no existing license)
+### 2a. Generate a fresh license (any tier; no existing row)
 
 ```bash
 curl -X POST http://<api-host>:9090/create_server \
@@ -183,7 +197,8 @@ What `deploy_license` does internally:
      host's `machine_id`.
    - Generate an RSA keypair under
      `bin/licenses/<machine_id>/<UTC-timestamp>/secrets/`.
-   - Run `mklicense` to produce `license.lic` (trial duration = 3 days).
+   - Run `mklicense` with `--feature` and `--duration` derived from
+     `license_type` (see the tier table above).
 4. Insert a row into `license` and append an audit entry to `history`.
 5. Pick the newest row from `versions` and resolve `path` on the API host.
 6. Build `license.tar.gz` containing the license, public key, and the
@@ -232,7 +247,7 @@ What `deploy_license` does internally:
     }
     ```
 
-### 2b. Paid license (reuse an existing license row)
+### 2b. Reuse an existing license row (L4 / L7 / Unified)
 
 ```bash
 curl -X POST http://<api-host>:9090/create_server \
@@ -243,20 +258,22 @@ curl -X POST http://<api-host>:9090/create_server \
     "user": "root",
     "pass": "<ssh-password>",
     "ssh_port": 22,
-    "license_type": "paid",
+    "license_type": "unified",
     "license_string": "<value from license.license column>",
     "token": "<operator-token>",
     "deploy_mode": "all"
   }'
 ```
 
-Differences from the trial path:
+Differences from the generate path:
 
 - No license is generated. The API looks up the row in `license` by
   `license = ?`, updates the connection fields (name/ip/user/pass/port/token),
   and repackages the stored license + public key.
 - Same `scp` + `deploy.sh` flow afterwards.
 - Returns `404` if `license_string` does not match any row.
+- `license_string` is **not** accepted when `license_type` is `trial` —
+  Trial licenses are always freshly generated. Sending one yields `400`.
 
 ---
 

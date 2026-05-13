@@ -16,8 +16,9 @@ Built with Node.js / Express 5 and MySQL.
 
 ## Features
 
-- Generates RSA-signed licenses (`paid` or `trial`) bound to a remote host's
-  `machine_id` via the bundled `mklicense` binary.
+- Generates RSA-signed licenses bound to a remote host's `machine_id` via the
+  bundled `mklicense` binary. Four license tiers are supported — `trial`,
+  `l4`, `l7`, `unified` — each with its own feature bitmask and duration.
 - Uploads artifacts to the target server with `sshpass` + `scp` and runs
   `bin/deploy.sh` remotely with one of three modes:
   - `all` — Dorian tarball + license + GeoIP, plus Python venv and systemd units.
@@ -152,8 +153,20 @@ Request body:
 }
 ```
 
-- `license_type`: `trial` or `paid` (case-insensitive). For `paid`, also send
-  `license_string` matching an existing row in the `license` table.
+- `license_type`: one of `trial`, `l4`, `l7`, `unified` (case-insensitive).
+  Each tier maps to a specific feature bitmask and duration:
+
+  | `license_type` | feature | duration  | reuse via `license_string`? |
+  | -------------- | ------- | --------- | --------------------------- |
+  | `trial`        | 7       | 3 days    | no (always generates)       |
+  | `l4`           | 1       | 365 days  | yes (optional)              |
+  | `l7`           | 2       | 365 days  | yes (optional)              |
+  | `unified`      | 3       | 365 days  | yes (optional)              |
+
+- `license_string` (optional): only accepted when `license_type` is `l4`,
+  `l7`, or `unified`. When provided, the API reuses an existing row in the
+  `license` table whose `license` column matches, instead of generating a
+  new license. Returns `404` if no row matches.
 - `deploy_mode` (optional): `all` (default), `license_only`, or
   `version_only`.
 
@@ -213,10 +226,15 @@ deploy_license/
 
 1. Validate payload (AJV against the schema in `server.js`).
 2. Fetch the latest row from `versions`; resolve the local Dorian tarball.
-3. For `trial`: call `bin/generate_license.sh` to SSH to the target, read its
-   `machine_id`, generate an RSA keypair, and run `mklicense` to produce a
-   signed `license.lic`. For `paid`: look up an existing license by
-   `license_string` in the `license` table.
+3. Resolve the license:
+   - If `license_string` is **not** provided (any `license_type`): call
+     `bin/generate_license.sh` to SSH to the target, read its `machine_id`,
+     generate an RSA keypair, and run `mklicense` with the feature/duration
+     that match the chosen `license_type`. Insert a new row in `license`.
+   - If `license_string` **is** provided (`l4` / `l7` / `unified` only):
+     look up an existing license row by `license = ?` and reuse the stored
+     signed `license.lic` + public key; update connection fields on that
+     row. Returns `404` if no match.
 4. Build `license.tar.gz` containing the license artifacts.
 5. `scp` the Dorian tarball, `license.tar.gz`, GeoIP archive, and `deploy.sh`
    into `/tmp/dorian_deploy_<token>/` on the target.

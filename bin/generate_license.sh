@@ -1,10 +1,18 @@
 #!/usr/bin/env bash
 # generate_license.sh — obtain machine_id (or accept one), create a per-id folder, generate RSA keys, run mklicense.
 #
-# Required: --license_type paid|trial
+# Required: --license_type trial|l4|l7|unified
 # If --machine_id is omitted, also required: --ip --user --pass --ssh_port
 #
-# Optional: --feature (default 7), --duration DAYS (if omitted: trial=30, paid=365)
+# Optional:
+#   --feature N   override the feature bitmask. Default by license_type:
+#                   trial   = 7
+#                   l4      = 1
+#                   l7      = 2
+#                   unified = 3
+#   --duration N  override the duration in days. Default by license_type:
+#                   trial   = 30
+#                   l4/l7/unified = 365
 #
 # Output layout: <this_dir>/licenses/<machine_id>/<UTC_timestamp>/
 #   secrets/server_private_key.pem, secrets/server_public_key.pem, license.lic, info.txt
@@ -36,7 +44,7 @@ USER=""
 PASS=""
 SSH_PORT=""
 LICENSE_TYPE=""
-FEATURE="7"
+FEATURE=""
 DURATION=""
 MACHINE_ID_ARG=""
 
@@ -57,19 +65,32 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-[[ -n "$LICENSE_TYPE" ]] || fail "--license_type is required (paid or trial)"
+[[ -n "$LICENSE_TYPE" ]] || fail "--license_type is required (trial, l4, l7, or unified)"
 
 LICENSE_TYPE="${LICENSE_TYPE,,}"
-[[ "$LICENSE_TYPE" == "paid" || "$LICENSE_TYPE" == "trial" ]] || fail "--license_type must be paid or trial"
+case "$LICENSE_TYPE" in
+  trial|l4|l7|unified) ;;
+  *) fail "--license_type must be one of: trial, l4, l7, unified" ;;
+esac
+
+# Per-type defaults (only used when the caller did not explicitly pass --feature / --duration).
+case "$LICENSE_TYPE" in
+  trial)   DEFAULT_FEATURE=7; DEFAULT_DURATION=30 ;;
+  l4)      DEFAULT_FEATURE=1; DEFAULT_DURATION=365 ;;
+  l7)      DEFAULT_FEATURE=2; DEFAULT_DURATION=365 ;;
+  unified) DEFAULT_FEATURE=3; DEFAULT_DURATION=365 ;;
+esac
+
+if [[ -n "$FEATURE" ]]; then
+  [[ "$FEATURE" =~ ^[0-9]+$ ]] || fail "--feature must be a non-negative integer"
+else
+  FEATURE="$DEFAULT_FEATURE"
+fi
 
 if [[ -n "$DURATION" ]]; then
   [[ "$DURATION" =~ ^[0-9]+$ ]] || fail "--duration must be a non-negative integer (days)"
 else
-  if [[ "$LICENSE_TYPE" == "trial" ]]; then
-    DURATION=30
-  else
-    DURATION=365
-  fi
+  DURATION="$DEFAULT_DURATION"
 fi
 
 FETCHED_REMOTE=0

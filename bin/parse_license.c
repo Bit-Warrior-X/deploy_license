@@ -4,7 +4,7 @@
  * Parses and verifies a license file produced by mklicense.c or the server:
  *   license_b64 = Base64( {
  *     "algorithm": "RSA-SHA256",
- *     "payload": { "machine_id":"...", "updated_at":"...", "duration":N, "feature":N, "license_type":"paid|trial" },
+ *     "payload": { "machine_id":"...", "updated_at":"...", "duration":N, "feature":N, "license_type":"trial|l4|l7|unified" },
  *     "signature": "<Base64(RSA-SHA256(payload_json_bytes))>"
  *   } )
  *

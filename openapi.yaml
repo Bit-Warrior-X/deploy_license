@@ -76,7 +76,7 @@ paths:
                     type: string
                   license_type:
                     type: string
-                    enum: [trial, paid]
+                    enum: [trial, l4, l7, unified]
                   version:
                     type: string
                     description: Dorian product version string from the versions table
@@ -145,10 +145,20 @@ components:
             - type: integer
         license_type:
           type: string
-          description: trial or paid (case-insensitive)
+          enum: [trial, l4, l7, unified]
+          description: >
+            License tier (case-insensitive). Determines the feature bitmask and default
+            duration written into the generated license:
+              trial   -> feature=7, duration=3 days
+              l4      -> feature=1, duration=365 days
+              l7      -> feature=2, duration=365 days
+              unified -> feature=3, duration=365 days
         license_string:
           type: string
-          description: Required when license_type is paid; must match the license column in the database
+          description: >
+            Optional. When license_type is l4, l7, or unified, providing this value
+            reuses an existing row in the license table whose license column matches
+            instead of generating a new license. Not accepted when license_type is trial.
         token:
           type: string
         deploy_mode:
@@ -182,4 +192,5 @@ components:
           description: Row uuid from the versions table (from get_versions)
         license_type:
           type: string
-          description: Optional trial or paid for response; defaults to trial
+          enum: [trial, l4, l7, unified]
+          description: Optional license tier label for the response; defaults to trial. Does not affect deploy behavior.
