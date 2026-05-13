@@ -1,0 +1,7 @@
+bin/geodb/*
+node_modules/
+logs/
+*.log
+.env
+.DS_Store
+/bin/licenses/*

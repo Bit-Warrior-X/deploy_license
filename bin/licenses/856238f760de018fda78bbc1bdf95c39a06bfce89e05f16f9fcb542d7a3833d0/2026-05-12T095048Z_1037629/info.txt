@@ -1,0 +1,17 @@
+generated_at_utc=2026-05-12T09:50:48Z
+machine_id=856238f760de018fda78bbc1bdf95c39a06bfce89e05f16f9fcb542d7a3833d0
+timestamp_folder=2026-05-12T095048Z_1037629
+machine_id_directory=/home/deploy_license/bin/licenses/856238f760de018fda78bbc1bdf95c39a06bfce89e05f16f9fcb542d7a3833d0
+generation_directory=/home/deploy_license/bin/licenses/856238f760de018fda78bbc1bdf95c39a06bfce89e05f16f9fcb542d7a3833d0/2026-05-12T095048Z_1037629
+machine_id_source=remote (get_remote_machine_id.sh)
+ssh_ip=192.142.44.140
+ssh_user=root
+ssh_port=22
+ssh_password_stored=no (not written to this file)
+license_type=trial
+feature=7
+duration_days=3
+private_key_path=/home/deploy_license/bin/licenses/856238f760de018fda78bbc1bdf95c39a06bfce89e05f16f9fcb542d7a3833d0/2026-05-12T095048Z_1037629/secrets/server_private_key.pem
+public_key_path=/home/deploy_license/bin/licenses/856238f760de018fda78bbc1bdf95c39a06bfce89e05f16f9fcb542d7a3833d0/2026-05-12T095048Z_1037629/secrets/server_public_key.pem
+license_file_path=/home/deploy_license/bin/licenses/856238f760de018fda78bbc1bdf95c39a06bfce89e05f16f9fcb542d7a3833d0/2026-05-12T095048Z_1037629/license.lic
+info_file_path=/home/deploy_license/bin/licenses/856238f760de018fda78bbc1bdf95c39a06bfce89e05f16f9fcb542d7a3833d0/2026-05-12T095048Z_1037629/info.txt

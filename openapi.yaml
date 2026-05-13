@@ -1,0 +1,185 @@
+openapi: 3.0.3
+info:
+  title: Deploy License API
+  version: 1.0.0
+servers:
+  - url: http://localhost:9090
+paths:
+  /get_versions:
+    get:
+      summary: List all Dorian product versions from the versions table
+      responses:
+        "200":
+          description: Ordered newest first by updated, then id
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  versions:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        uuid:
+                          type: string
+                        version:
+                          type: string
+                        full_name:
+                          type: string
+                          nullable: true
+                        path:
+                          type: string
+                          nullable: true
+                        updated:
+                          type: string
+                          nullable: true
+                          description: ISO 8601 when available
+        "500":
+          description: Database or server error
+  /upgrade_version:
+    post:
+      summary: Upload selected Dorian tarball and run deploy.sh --version-only (no license generation)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpgradeVersionRequest"
+      responses:
+        "200":
+          description: Remote deploy finished (same shape as create_server 200 for version fields)
+        "400":
+          description: Invalid payload
+        "404":
+          description: version_uuid not found in versions table
+        "500":
+          description: SCP or deploy failure
+  /create_server:
+    post:
+      summary: Generate or resolve a license, upload artifacts, run remote deploy.sh
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateServerRequest"
+      responses:
+        "200":
+          description: Artifacts uploaded and remote deploy.sh finished successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  description:
+                    type: string
+                  license_type:
+                    type: string
+                    enum: [trial, paid]
+                  version:
+                    type: string
+                    description: Dorian product version string from the versions table
+                  expire_date:
+                    type: string
+                    format: date-time
+                    description: License expiry as ISO 8601 (empty if not set in DB)
+                  server_status:
+                    type: string
+                    enum: [deployed, running, stopped]
+                    description: >
+                      Remote Dorian deploy/runtime summary. license_only is always deployed;
+                      all/version_only uses athens.service state (running/stopped) or stopped on systemd soft-fail.
+                  uuid:
+                    type: string
+                  machine_id:
+                    type: string
+                    nullable: true
+                  remote_dir:
+                    type: string
+                  deploy_mode:
+                    type: string
+                    description: Mode used on the target (all, license_only, or version_only)
+                  remote_deploy_flag:
+                    type: string
+                    description: Flag passed to deploy.sh (--all, --license-only, or --version-only)
+                  uploaded_files:
+                    type: array
+                    items:
+                      type: string
+                  dorian_version:
+                    type: object
+                    properties:
+                      version:
+                        type: string
+                        nullable: true
+                      full_name:
+                        type: string
+                        nullable: true
+                      uuid:
+                        type: string
+        "400":
+          description: Invalid payload
+        "404":
+          description: Paid license_string not found in database
+        "500":
+          description: License generation failure, missing product path, SCP failure, or other server error
+components:
+  schemas:
+    CreateServerRequest:
+      type: object
+      required: [name, ip, user, pass, ssh_port, license_type, token]
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+        ip:
+          type: string
+        user:
+          type: string
+        pass:
+          type: string
+        ssh_port:
+          oneOf:
+            - type: string
+            - type: integer
+        license_type:
+          type: string
+          description: trial or paid (case-insensitive)
+        license_string:
+          type: string
+          description: Required when license_type is paid; must match the license column in the database
+        token:
+          type: string
+        deploy_mode:
+          type: string
+          enum: [all, license_only, version_only]
+          description: >
+            Omitted or "all" runs --all (extract dorian, license, GeoIP; venv + systemd).
+            "license_only" runs --license-only (unpack license.tar.gz only; no venv or systemd).
+            "version_only" runs --version-only (dorian tarball only; venv + systemd).
+    UpgradeVersionRequest:
+      type: object
+      required: [name, ip, user, pass, ssh_port, token, version_uuid]
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+        ip:
+          type: string
+        user:
+          type: string
+        pass:
+          type: string
+        ssh_port:
+          oneOf:
+            - type: string
+            - type: integer
+        token:
+          type: string
+        version_uuid:
+          type: string
+          description: Row uuid from the versions table (from get_versions)
+        license_type:
+          type: string
+          description: Optional trial or paid for response; defaults to trial
