@@ -115,6 +115,21 @@ const validateUpgradeVersion = ajv.compile({
   },
 });
 
+const validateUpgradeLicense = ajv.compile({
+  type: "object",
+  required: ["name", "ip", "user", "pass", "ssh_port", "token", "license_type"],
+  additionalProperties: false,
+  properties: {
+    name: { type: "string", minLength: 1 },
+    ip: { type: "string", minLength: 1 },
+    user: { type: "string", minLength: 1 },
+    pass: { type: "string", minLength: 1 },
+    ssh_port: { anyOf: [{ type: "string", minLength: 1 }, { type: "number" }] },
+    token: { type: "string", minLength: 1 },
+    license_type: { type: "string", minLength: 1 },
+  },
+});
+
 async function appendSessionLog(ip, token, event, payload = {}) {
   await fs.mkdir(LOG_DIR, { recursive: true });
   const safeIp = String(ip).replace(/[^a-zA-Z0-9_.-]/g, "_");
@@ -563,6 +578,301 @@ async function updateExistingLicenseConnection({ id, name, ip, user, pass, sshPo
     [name, ip, user, pass, Number(sshPort), token, id]
   );
 }
+
+/**
+ * Replace license material for an existing deployment token (same uuid row).
+ * Used by POST /upgrade_license after generating a new tier-bound license on the host.
+ */
+async function updateLicenseRowByTokenGenerate({
+  token,
+  name,
+  ip,
+  user,
+  pass,
+  sshPort,
+  machineId,
+  licenseContent,
+  pubKey,
+  privateKey,
+  durationDays,
+}) {
+  const [result] = await dbPool.execute(
+    `UPDATE license SET name = ?, ip = ?, user = ?, password = ?, ssh_port = ?,
+     machine_id = ?, license = ?, pub_key = ?, private_key = ?,
+     expire_date = DATE_ADD(UTC_TIMESTAMP(), INTERVAL ? DAY),
+     updated = CURRENT_TIMESTAMP
+     WHERE token = ?`,
+    [
+      name,
+      ip,
+      user,
+      pass,
+      Number(sshPort),
+      machineId,
+      licenseContent,
+      pubKey,
+      privateKey,
+      Number(durationDays),
+      token,
+    ]
+  );
+  if (!result || result.affectedRows === 0) {
+    throw new Error("no license row updated for token");
+  }
+}
+
+app.post("/upgrade_license", async (req, res) => {
+  const { name, ip, user, pass, ssh_port, license_type, token } = req.body;
+  const reqId = req._reqId || crypto.randomUUID();
+  const logContext = { reqId };
+
+  if (!validateUpgradeLicense(req.body)) {
+    deployLog("warn", reqId, "validation failed for upgrade_license", {
+      errors: validateUpgradeLicense.errors,
+    });
+    return validationError(res, validateUpgradeLicense);
+  }
+
+  const lt = String(license_type).toLowerCase();
+  const ltConfig = LICENSE_TYPES[lt];
+  if (!ltConfig) {
+    deployLog("warn", reqId, "invalid license_type", { license_type: lt });
+    return res.status(400).json({
+      description: `license_type must be one of: ${Object.keys(LICENSE_TYPES).join(", ")}`,
+    });
+  }
+
+  let workDir;
+  try {
+    const [licRows] = await dbPool.execute(
+      "SELECT uuid, machine_id FROM license WHERE token = ? LIMIT 1",
+      [token]
+    );
+    if (!licRows.length) {
+      deployLog("warn", reqId, "upgrade_license: token not found", {});
+      return res.status(404).json({ description: "no license row for this deployment token" });
+    }
+    const rowUuid = licRows[0].uuid;
+
+    try {
+      await fs.access(MACHINE_ID_BIN);
+    } catch {
+      deployLog("error", reqId, "missing machine_id binary", { path: MACHINE_ID_BIN });
+      return res.status(500).json({
+        code: 5000,
+        description: `missing machine_id binary at ${MACHINE_ID_BIN}; build from machine_id.c`,
+      });
+    }
+    try {
+      await fs.access(DEPLOY_SH);
+    } catch {
+      deployLog("error", reqId, "missing deploy script", { path: DEPLOY_SH });
+      return res.status(500).json({
+        code: 5000,
+        description: `missing deploy script at ${DEPLOY_SH}`,
+      });
+    }
+    try {
+      await fs.access(GEODB_MMDB_TAR_GZ);
+    } catch {
+      deployLog("error", reqId, "missing GeoIP archive", { path: GEODB_MMDB_TAR_GZ });
+      return res.status(500).json({
+        code: 5000,
+        description: `missing GeoIP database archive at ${GEODB_MMDB_TAR_GZ}`,
+      });
+    }
+
+    deployLog("info", reqId, "upgrade_license accepted", {
+      name,
+      ip,
+      user,
+      ssh_port,
+      license_type: lt,
+    });
+    await appendSessionLog(ip, token, "upgrade_license_received", { name, ssh_port, license_type: lt });
+
+    let genOut;
+    try {
+      genOut = await runGenerateLicenseScript({
+        ip,
+        user,
+        pass,
+        sshPort: ssh_port,
+        licenseType: lt,
+        durationDays: ltConfig.durationDays,
+        feature: ltConfig.feature,
+        logContext,
+      });
+    } catch (e) {
+      deployLog("error", reqId, "generate_license failed", { message: e.message });
+      await appendSessionLog(ip, token, "upgrade_license_generate_failed", e.generateLicensePayload || { error: e.message });
+      if (e.generateLicensePayload) {
+        return res.status(500).json({ code: 5000, ...e.generateLicensePayload });
+      }
+      return res.status(500).json({
+        code: 5000,
+        description: "generate_license.sh failed",
+        error: e.message,
+        stderr: e.stderr,
+        stdout: e.stdout,
+      });
+    }
+
+    const licenseFilePath = path.resolve(genOut.licensePath);
+    const workFolder = path.dirname(licenseFilePath);
+    const publicKeyPath = path.join(workFolder, "secrets", "server_public_key.pem");
+    const privateKeyPath = path.join(workFolder, "secrets", "server_private_key.pem");
+
+    const machineId = parseMachineIdFromLicensePath(licenseFilePath);
+    const licenseContent = await fs.readFile(licenseFilePath, "utf8");
+    const pubKey = await fs.readFile(publicKeyPath, "utf8");
+    const privateKey = await fs.readFile(privateKeyPath, "utf8");
+
+    await updateLicenseRowByTokenGenerate({
+      token,
+      name,
+      ip,
+      user,
+      pass,
+      sshPort: ssh_port,
+      machineId,
+      licenseContent,
+      pubKey,
+      privateKey,
+      durationDays: ltConfig.durationDays,
+    });
+    await writeHistory(
+      rowUuid,
+      `${lt} license upgraded (feature=${ltConfig.feature}, duration=${ltConfig.durationDays}d) for machine_id=${machineId} ip=${ip}`
+    );
+    deployLog("info", reqId, "upgrade_license DB row updated", { rowUuid, machineId });
+
+    workDir = await fs.mkdtemp(path.join(os.tmpdir(), `deploy_license-upgrade-lic-${lt}-`));
+
+    const versionRow = await getLatestDorianVersionRow();
+    const productPath = path.resolve(versionRow.path);
+    try {
+      await fs.access(productPath);
+    } catch {
+      deployLog("error", reqId, "dorian product path not readable", { productPath });
+      return res.status(500).json({
+        code: 5000,
+        description: "dorian product path from versions table is not readable on this host",
+        path: productPath,
+      });
+    }
+
+    const tarballPath = await createLicenseTarball({
+      machineIdBin: MACHINE_ID_BIN,
+      licenseFile: licenseFilePath,
+      publicKeyPem: publicKeyPath,
+      token,
+      workDir,
+      logContext,
+    });
+
+    const remoteDir = `${REMOTE_DEPLOY_PREFIX}_${safeRemoteTokenSegment(token)}`;
+    const effectiveDeployMode = "license_only";
+    const remoteDeployFlag = "--license-only";
+
+    deployLog("info", reqId, "upgrade_license remote staging", {
+      remoteDir,
+      tarball: path.basename(tarballPath),
+      product: path.basename(productPath),
+    });
+    await ensureRemoteDir({ ip, user, pass, sshPort: ssh_port, remoteDir, logContext });
+    await scpFilesToRemote({
+      ip,
+      user,
+      pass,
+      sshPort: ssh_port,
+      localFiles: [tarballPath, productPath, DEPLOY_SH, GEODB_MMDB_TAR_GZ],
+      remoteDir,
+      logContext,
+    });
+
+    deployLog("info", reqId, "running remote deploy.sh", { remoteDeployFlag, remoteDir });
+    let serviceDeployWarning = null;
+    try {
+      await runRemoteDeployScript({
+        ip,
+        user,
+        pass,
+        sshPort: ssh_port,
+        remoteDir,
+        deployFlag: remoteDeployFlag,
+        logContext,
+      });
+    } catch (remoteErr) {
+      serviceDeployWarning = systemdServiceDeployWarning(remoteErr.stderr, remoteErr.stdout);
+      if (!serviceDeployWarning) {
+        throw remoteErr;
+      }
+      deployLog("warn", reqId, "remote deploy.sh exited non-zero; treating as success (artifacts deployed)", {
+        warning: serviceDeployWarning,
+        exitCode: remoteErr.code,
+      });
+    }
+
+    const serverStatus = deriveCreateServerDeploymentStatus(effectiveDeployMode, serviceDeployWarning, "unknown");
+
+    const [[expireRows]] = await dbPool.execute("SELECT expire_date FROM license WHERE uuid = ? LIMIT 1", [rowUuid]);
+    const expireDateIso = licenseExpireToIso(expireRows?.expire_date);
+
+    await appendSessionLog(ip, token, serviceDeployWarning ? "upgrade_license_completed_with_warning" : "upgrade_license_completed", {
+      remoteDir,
+      version: versionRow.version,
+      license_type: lt,
+      server_status: serverStatus,
+      ...(serviceDeployWarning ? { service_deploy_warning: serviceDeployWarning } : {}),
+    });
+
+    const defaultDescription = "License upgraded and pushed (deploy.sh --license-only)";
+    const responsePayload = {
+      description: serviceDeployWarning || defaultDescription,
+      license_type: lt,
+      version: versionRow.version,
+      expire_date: expireDateIso,
+      server_status: serverStatus,
+      uuid: rowUuid,
+      machine_id: machineId,
+      remote_dir: remoteDir,
+      deploy_mode: effectiveDeployMode,
+      remote_deploy_flag: remoteDeployFlag,
+      uploaded_files: [
+        "license.tar.gz",
+        path.basename(productPath),
+        path.basename(DEPLOY_SH),
+        path.basename(GEODB_MMDB_TAR_GZ),
+      ],
+      dorian_version: {
+        version: versionRow.version,
+        full_name: versionRow.full_name,
+        uuid: versionRow.uuid,
+      },
+      ...(serviceDeployWarning ? { service_deploy_warning: serviceDeployWarning } : {}),
+    };
+    deployLog("info", reqId, "upgrade_license success", {
+      version: versionRow.version,
+      server_status: serverStatus,
+    });
+    return res.status(200).json(responsePayload);
+  } catch (error) {
+    await appendSessionLog(ip, token, "upgrade_license_failed", { error: error.message, code: error.code });
+    deployLog("error", reqId, `upgrade_license failed: ${error.message}`, {
+      code: error.code,
+    });
+    return res.status(500).json({
+      code: 5000,
+      description: "upgrade_license failed",
+      error: error.message,
+    });
+  } finally {
+    if (workDir) {
+      await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
+    }
+  }
+});
 
 app.post("/upgrade_version", async (req, res) => {
   const { name, ip, user, pass, ssh_port, token, version_uuid, license_type } = req.body;

@@ -37,6 +37,24 @@ paths:
                           description: ISO 8601 when available
         "500":
           description: Database or server error
+  /upgrade_license:
+    post:
+      summary: Regenerate license for an existing deployment token and run deploy.sh --license-only
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpgradeLicenseRequest"
+      responses:
+        "200":
+          description: New license pushed to the host (same response shape as create_server for license fields)
+        "400":
+          description: Invalid payload or license_type
+        "404":
+          description: No license row for the given token
+        "500":
+          description: generate_license, SCP, or deploy failure
   /upgrade_version:
     post:
       summary: Upload selected Dorian tarball and run deploy.sh --version-only (no license generation)
@@ -168,6 +186,29 @@ components:
             Omitted or "all" runs --all (extract dorian, license, GeoIP; venv + systemd).
             "license_only" runs --license-only (unpack license.tar.gz only; no venv or systemd).
             "version_only" runs --version-only (dorian tarball only; venv + systemd).
+    UpgradeLicenseRequest:
+      type: object
+      required: [name, ip, user, pass, ssh_port, token, license_type]
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+        ip:
+          type: string
+        user:
+          type: string
+        pass:
+          type: string
+        ssh_port:
+          oneOf:
+            - type: string
+            - type: integer
+        token:
+          type: string
+        license_type:
+          type: string
+          enum: [trial, l4, l7, unified]
+          description: New tier to generate and deploy for this token (case-insensitive).
     UpgradeVersionRequest:
       type: object
       required: [name, ip, user, pass, ssh_port, token, version_uuid]
