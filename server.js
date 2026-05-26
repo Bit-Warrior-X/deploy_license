@@ -446,22 +446,95 @@ async function runRemoteDeployScript({ ip, user, pass, sshPort, remoteDir, deplo
   );
 }
 
-/** Remotely read `systemctl is-active athens.service` (stdout only; exit code ignored). */
-async function probeRemoteAthensSystemdState({ ip, user, pass, sshPort, logContext }) {
-  const script =
-    's=$(systemctl is-active athens.service 2>/dev/null || true); printf %s "${s:-unknown}"';
+/** Remotely read `systemctl is-active <unit>` (stdout only; exit code ignored). */
+async function probeRemoteSystemdUnit({ ip, user, pass, sshPort, unit, logContext, step }) {
+  const script = `s=$(systemctl is-active ${unit} 2>/dev/null || true); printf '%s' "\${s:-unknown}"`;
   const remoteShell = `bash -lc ${JSON.stringify(script)}`;
   try {
     const { stdout } = await runCommand(
       "sshpass",
       ["-p", String(pass), "ssh", ...SSH_OPTS, "-p", String(sshPort), `${user}@${ip}`, remoteShell],
-      { logContext: { ...logContext, step: "ssh_probe_athens" } }
+      { logContext: { ...logContext, step: step || `ssh_probe_${unit}` } }
     );
     return stdout.trim() || "unknown";
   } catch (e) {
-    deployLog("warn", logContext.reqId, "probeRemoteAthensSystemdState failed", { message: e.message });
+    deployLog("warn", logContext.reqId, `probeRemoteSystemdUnit ${unit} failed`, { message: e.message });
     return "unknown";
   }
+}
+
+/** @deprecated use probeRemoteSystemdUnit */
+async function probeRemoteAthensSystemdState(opts) {
+  return probeRemoteSystemdUnit({ ...opts, unit: "athens.service", step: "ssh_probe_athens" });
+}
+
+function mapSystemdToRuntimeStatus(systemdState) {
+  const s = String(systemdState || "")
+    .trim()
+    .toLowerCase();
+  if (s === "active" || s === "activating" || s === "reloading") {
+    return "running";
+  }
+  if (s === "failed" || s === "inactive" || s === "dead") {
+    return "stopped";
+  }
+  return "unknown";
+}
+
+/**
+ * Probe angelos (orchestrator), sparta (L4), and athens (L7) on the target host.
+ * @returns {{ angelos: string, l4: string, l7: string }}
+ */
+async function probeAllServiceStates({
+  ip,
+  user,
+  pass,
+  sshPort,
+  effectiveDeployMode,
+  serviceDeployWarning,
+  logContext,
+}) {
+  const mode = String(effectiveDeployMode || "all").toLowerCase();
+  if (mode === "license_only") {
+    return { angelos: "deployed", l4: "deployed", l7: "deployed" };
+  }
+  if (serviceDeployWarning) {
+    return { angelos: "stopped", l4: "stopped", l7: "stopped" };
+  }
+  const [angelosRaw, spartaRaw, athensRaw] = await Promise.all([
+    probeRemoteSystemdUnit({
+      ip,
+      user,
+      pass,
+      sshPort,
+      unit: "angelos.service",
+      logContext,
+      step: "ssh_probe_angelos",
+    }),
+    probeRemoteSystemdUnit({
+      ip,
+      user,
+      pass,
+      sshPort,
+      unit: "sparta.service",
+      logContext,
+      step: "ssh_probe_sparta",
+    }),
+    probeRemoteSystemdUnit({
+      ip,
+      user,
+      pass,
+      sshPort,
+      unit: "athens.service",
+      logContext,
+      step: "ssh_probe_athens",
+    }),
+  ]);
+  return {
+    angelos: mapSystemdToRuntimeStatus(angelosRaw),
+    l4: mapSystemdToRuntimeStatus(spartaRaw),
+    l7: mapSystemdToRuntimeStatus(athensRaw),
+  };
 }
 
 /**
@@ -814,7 +887,16 @@ app.post("/upgrade_license", async (req, res) => {
       });
     }
 
-    const serverStatus = deriveCreateServerDeploymentStatus(effectiveDeployMode, serviceDeployWarning, "unknown");
+    const layerStatus = await probeAllServiceStates({
+      ip,
+      user,
+      pass,
+      sshPort: ssh_port,
+      effectiveDeployMode,
+      serviceDeployWarning,
+      logContext,
+    });
+    const serverStatus = layerStatus.angelos;
 
     const [[expireRows]] = await dbPool.execute("SELECT expire_date FROM license WHERE uuid = ? LIMIT 1", [rowUuid]);
     const expireDateIso = licenseExpireToIso(expireRows?.expire_date);
@@ -824,6 +906,8 @@ app.post("/upgrade_license", async (req, res) => {
       version: versionRow.version,
       license_type: lt,
       server_status: serverStatus,
+      l4_status: layerStatus.l4,
+      l7_status: layerStatus.l7,
       ...(serviceDeployWarning ? { service_deploy_warning: serviceDeployWarning } : {}),
     });
 
@@ -834,6 +918,8 @@ app.post("/upgrade_license", async (req, res) => {
       version: versionRow.version,
       expire_date: expireDateIso,
       server_status: serverStatus,
+      l4_status: layerStatus.l4,
+      l7_status: layerStatus.l7,
       uuid: rowUuid,
       machine_id: machineId,
       remote_dir: remoteDir,
@@ -988,18 +1074,16 @@ app.post("/upgrade_version", async (req, res) => {
       });
     }
 
-    const athensSystemdState = await probeRemoteAthensSystemdState({
+    const layerStatus = await probeAllServiceStates({
       ip,
       user,
       pass,
       sshPort: ssh_port,
-      logContext,
-    });
-    const serverStatus = deriveCreateServerDeploymentStatus(
       effectiveDeployMode,
       serviceDeployWarning,
-      athensSystemdState
-    );
+      logContext,
+    });
+    const serverStatus = layerStatus.angelos;
 
     let expireDateIso = "";
     if (rowUuid) {
@@ -1011,6 +1095,8 @@ app.post("/upgrade_version", async (req, res) => {
       remoteDir,
       version: versionRow.version,
       server_status: serverStatus,
+      l4_status: layerStatus.l4,
+      l7_status: layerStatus.l7,
       ...(serviceDeployWarning ? { service_deploy_warning: serviceDeployWarning } : {}),
     });
 
@@ -1025,6 +1111,8 @@ app.post("/upgrade_version", async (req, res) => {
       version: versionRow.version,
       expire_date: expireDateIso,
       server_status: serverStatus,
+      l4_status: layerStatus.l4,
+      l7_status: layerStatus.l7,
       uuid: rowUuid,
       machine_id: machineId,
       remote_dir: remoteDir,
@@ -1320,21 +1408,16 @@ app.post("/create_server", async (req, res) => {
       });
     }
 
-    let athensSystemdState = "unknown";
-    if (effectiveDeployMode !== "license_only") {
-      athensSystemdState = await probeRemoteAthensSystemdState({
-        ip,
-        user,
-        pass,
-        sshPort: ssh_port,
-        logContext,
-      });
-    }
-    const serverStatus = deriveCreateServerDeploymentStatus(
+    const layerStatus = await probeAllServiceStates({
+      ip,
+      user,
+      pass,
+      sshPort: ssh_port,
       effectiveDeployMode,
       serviceDeployWarning,
-      athensSystemdState
-    );
+      logContext,
+    });
+    const serverStatus = layerStatus.angelos;
 
     await appendSessionLog(ip, token, serviceDeployWarning ? "create_server_completed_with_service_warning" : "create_server_completed", {
       remoteDir,
@@ -1342,6 +1425,8 @@ app.post("/create_server", async (req, res) => {
       license_type: lt,
       deploy_mode: effectiveDeployMode,
       server_status: serverStatus,
+      l4_status: layerStatus.l4,
+      l7_status: layerStatus.l7,
       ...(serviceDeployWarning ? { service_deploy_warning: serviceDeployWarning } : {}),
     });
 
@@ -1355,6 +1440,8 @@ app.post("/create_server", async (req, res) => {
       version: versionRow.version,
       expire_date: expireDateIso,
       server_status: serverStatus,
+      l4_status: layerStatus.l4,
+      l7_status: layerStatus.l7,
       uuid: rowUuid,
       machine_id: machineId,
       remote_dir: remoteDir,
