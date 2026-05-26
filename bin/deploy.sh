@@ -17,6 +17,7 @@
 #   dbip-full-2026-02.mmdb.tar.gz  -> /usr/local/share/dorian/athens/nginx/lua/geoip2
 #
 # After a dorian payload extract (--all or --version-only):
+#   - Install athens-luajit.conf to /etc/ld.so.conf.d/ and run ldconfig
 #   - Python venv under /usr/local/share/dorian/angelos/venv + pip install -r requirements.txt
 #   - Install systemd units to /etc/systemd/system/, daemon-reload, enable --now:
 #       angelos.service, athens.service, sparta.service
@@ -76,6 +77,15 @@ setup_angelos_venv() {
   echo "installed angelos Python requirements into ${ANGELOS_VENV}"
 }
 
+setup_athens_ldconfig() {
+  local conf_src="${DORIAN_ROOT}/athens/athens-luajit.conf"
+  local conf_dest="/etc/ld.so.conf.d/athens-luajit.conf"
+  [[ -f "${conf_src}" ]] || fail "missing athens ld config: ${conf_src}"
+  maybe_sudo install -m 644 "${conf_src}" "${conf_dest}"
+  maybe_sudo ldconfig
+  echo "installed ${conf_dest} and ran ldconfig"
+}
+
 install_systemd_units() {
   local -a units=(
     "${DORIAN_ROOT}/angelos/angelos.service"
@@ -99,6 +109,7 @@ install_systemd_units() {
 }
 
 post_install_after_dorian_extract() {
+  setup_athens_ldconfig
   setup_angelos_venv
   install_systemd_units
 }
