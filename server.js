@@ -96,6 +96,7 @@ const validateCreateServer = ajv.compile({
     license_string: { type: "string" },
     token: { type: "string", minLength: 1 },
     deploy_mode: { type: "string", enum: ["all", "license_only", "version_only"] },
+    version_uuid: { type: "string", minLength: 1 },
   },
 });
 
@@ -326,7 +327,7 @@ function parseMachineIdFromLicensePath(licenseFilePath) {
 
 async function getLatestDorianVersionRow() {
   const [rows] = await dbPool.execute(
-    "SELECT uuid, version, full_name, path FROM versions ORDER BY updated DESC, id DESC LIMIT 1"
+    "SELECT uuid, version, os, full_name, path FROM versions ORDER BY updated DESC, id DESC LIMIT 1"
   );
   if (!rows.length || !rows[0].path) {
     const err = new Error("no dorian product path found in versions table");
@@ -334,6 +335,23 @@ async function getLatestDorianVersionRow() {
     throw err;
   }
   return rows[0];
+}
+
+async function resolveDorianVersionRow(versionUuid) {
+  const id = String(versionUuid || "").trim();
+  if (id) {
+    const [rows] = await dbPool.execute(
+      "SELECT uuid, version, os, full_name, path FROM versions WHERE uuid = ? LIMIT 1",
+      [id]
+    );
+    if (!rows.length || !rows[0].path) {
+      const err = new Error("version_uuid not found in versions table");
+      err.code = "VERSION_NOT_FOUND";
+      throw err;
+    }
+    return rows[0];
+  }
+  return getLatestDorianVersionRow();
 }
 
 function safeRemoteTokenSegment(token) {
@@ -568,11 +586,12 @@ app.get("/get_versions", async (req, res) => {
   const reqId = req._reqId || crypto.randomUUID();
   try {
     const [rows] = await dbPool.execute(
-      "SELECT uuid, version, full_name, path, updated FROM versions ORDER BY updated DESC, id DESC"
+      "SELECT uuid, version, os, full_name, path, updated FROM versions ORDER BY updated DESC, id DESC"
     );
     const versions = (rows || []).map((r) => ({
       uuid: r.uuid,
       version: r.version,
+      os: r.os ?? null,
       full_name: r.full_name,
       path: r.path,
       updated:
@@ -822,7 +841,15 @@ app.post("/upgrade_license", async (req, res) => {
 
     workDir = await fs.mkdtemp(path.join(os.tmpdir(), `deploy_license-upgrade-lic-${lt}-`));
 
-    const versionRow = await getLatestDorianVersionRow();
+    let versionRow;
+    try {
+      versionRow = await getLatestDorianVersionRow();
+    } catch (e) {
+      if (e.code === "NO_VERSION") {
+        return res.status(500).json({ code: 5000, description: e.message });
+      }
+      throw e;
+    }
     const productPath = path.resolve(versionRow.path);
     try {
       await fs.access(productPath);
@@ -985,7 +1012,7 @@ app.post("/upgrade_version", async (req, res) => {
     }
 
     const [verRows] = await dbPool.execute(
-      "SELECT uuid, version, full_name, path FROM versions WHERE uuid = ? LIMIT 1",
+      "SELECT uuid, version, os, full_name, path FROM versions WHERE uuid = ? LIMIT 1",
       [version_uuid]
     );
     if (!verRows.length) {
@@ -1109,6 +1136,7 @@ app.post("/upgrade_version", async (req, res) => {
       description: serviceDeployWarning || defaultDescription,
       license_type: lt,
       version: versionRow.version,
+      os: versionRow.os ?? null,
       expire_date: expireDateIso,
       server_status: serverStatus,
       l4_status: layerStatus.l4,
@@ -1121,6 +1149,7 @@ app.post("/upgrade_version", async (req, res) => {
       uploaded_files: [path.basename(productPath), path.basename(DEPLOY_SH)],
       dorian_version: {
         version: versionRow.version,
+        os: versionRow.os ?? null,
         full_name: versionRow.full_name,
         uuid: versionRow.uuid,
       },
@@ -1149,7 +1178,7 @@ app.post("/upgrade_version", async (req, res) => {
 });
 
 app.post("/create_server", async (req, res) => {
-  const { name, ip, user, pass, ssh_port, license_type, license_string, token, deploy_mode } = req.body;
+  const { name, ip, user, pass, ssh_port, license_type, license_string, token, deploy_mode, version_uuid } = req.body;
   const reqId = req._reqId || crypto.randomUUID();
 
   if (!validateCreateServer(req.body)) {
@@ -1344,7 +1373,18 @@ app.post("/create_server", async (req, res) => {
       await writeHistory(rowUuid, `${lt} license reused (license_string match) for ip=${ip}`);
     }
 
-    const versionRow = await getLatestDorianVersionRow();
+    let versionRow;
+    try {
+      versionRow = await resolveDorianVersionRow(version_uuid);
+    } catch (e) {
+      if (e.code === "NO_VERSION") {
+        return res.status(500).json({ code: 5000, description: e.message });
+      }
+      if (e.code === "VERSION_NOT_FOUND") {
+        return res.status(404).json({ description: "version not found" });
+      }
+      throw e;
+    }
     const productPath = path.resolve(versionRow.path);
     try {
       await fs.access(productPath);
@@ -1438,6 +1478,7 @@ app.post("/create_server", async (req, res) => {
       description: serviceDeployWarning || defaultDescription,
       license_type: lt,
       version: versionRow.version,
+      os: versionRow.os ?? null,
       expire_date: expireDateIso,
       server_status: serverStatus,
       l4_status: layerStatus.l4,
@@ -1455,6 +1496,7 @@ app.post("/create_server", async (req, res) => {
       ],
       dorian_version: {
         version: versionRow.version,
+        os: versionRow.os ?? null,
         full_name: versionRow.full_name,
         uuid: versionRow.uuid,
       },

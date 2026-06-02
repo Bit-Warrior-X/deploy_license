@@ -124,9 +124,10 @@ Returns Dorian product versions from the `versions` table, newest first.
   "versions": [
     {
       "uuid": "…",
-      "version": "1.2.3",
-      "full_name": "dorian-ddos-firewall-1.2.3",
-      "path": "/srv/releases/dorian-ddos-firewall-1.2.3.tar.gz",
+      "version": "0.1.7",
+      "os": "ubuntu-22.04",
+      "full_name": "dorian-ddos-firewall-0.1.7-ubuntu-22.04-payload-<sha256>.tar.gz",
+      "path": "/opt/dorian/uploads/dorian-ddos-firewall-0.1.7-ubuntu-22.04-payload-<sha256>.tar.gz",
       "updated": "2026-05-13T00:00:00.000Z"
     }
   ]

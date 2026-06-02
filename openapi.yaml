@@ -25,6 +25,10 @@ paths:
                           type: string
                         version:
                           type: string
+                        os:
+                          type: string
+                          nullable: true
+                          description: Target OS label from filename (e.g. ubuntu-22.04)
                         full_name:
                           type: string
                           nullable: true
@@ -186,6 +190,10 @@ components:
             Omitted or "all" runs --all (extract dorian, license, GeoIP; venv + systemd).
             "license_only" runs --license-only (unpack license.tar.gz only; no venv or systemd).
             "version_only" runs --version-only (dorian tarball only; venv + systemd).
+        version_uuid:
+          type: string
+          description: >
+            Row uuid from versions (from get_versions). When omitted, the newest versions row is used.
     UpgradeLicenseRequest:
       type: object
       required: [name, ip, user, pass, ssh_port, token, license_type]
