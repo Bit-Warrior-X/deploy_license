@@ -106,12 +106,6 @@ paths:
                     type: string
                     format: date-time
                     description: License expiry as ISO 8601 (empty if not set in DB)
-                  server_status:
-                    type: string
-                    enum: [deployed, running, stopped]
-                    description: >
-                      Remote Dorian deploy/runtime summary. license_only is always deployed;
-                      all/version_only uses athens.service state (running/stopped) or stopped on systemd soft-fail.
                   uuid:
                     type: string
                   machine_id:
