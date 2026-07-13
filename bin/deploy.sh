@@ -19,7 +19,7 @@
 # After a dorian payload extract (--all or --version-only):
 #   - Install athens-luajit.conf to /etc/ld.so.conf.d/ and run ldconfig
 #   - Python venv under /usr/local/share/dorian/angelos/venv + pip install -r requirements.txt
-#   - Install systemd units to /etc/systemd/system/, daemon-reload, enable --now:
+#   - Install systemd units to /etc/systemd/system/, daemon-reload, enable + restart:
 #       angelos.service, athens.service, sparta.service
 #   Requires sudo (or run as root) for /etc/systemd/system and venv under /usr/local/share/dorian.
 #
@@ -102,9 +102,11 @@ install_systemd_units() {
 
   maybe_sudo systemctl daemon-reload
 
+  # enable for boot; restart so package updates stop old processes and load new binaries
   for dest_name in angelos.service athens.service sparta.service; do
-    maybe_sudo systemctl enable --now "${dest_name}"
-    echo "enabled and started: ${dest_name}"
+    maybe_sudo systemctl enable "${dest_name}"
+    maybe_sudo systemctl restart "${dest_name}"
+    echo "enabled and restarted: ${dest_name}"
   done
 }
 

@@ -34,7 +34,8 @@ CREATE TABLE IF NOT EXISTS `versions` (
   `created` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_versions_uuid` (`uuid`)
+  UNIQUE KEY `uk_versions_version_os` (`version`, `os`),
+  KEY `idx_versions_uuid` (`uuid`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS `history` (
